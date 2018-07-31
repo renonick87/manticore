@@ -6,22 +6,24 @@ module.exports = {
 	* @param {object} job - Object of the job file intended for submission to Nomad
 	* @param {string} id - ID of the user
 	* @param {UserRequest} request - Request list KV
+	* @param {object} strings - An object of string constants that come from constants.js
 	*/
-	addCoreGroup: function (job, id, request) {
+	addCoreGroup: function (job, id, request, strings) {
 		//this adds a group for a user so that another core will be created
 		//since each group name must be different make the name based off of the user id
 		//core-<id>
-		var groupName = "core-group-" + id;
+		var groupName = strings.coreGroupPrefix + id;
 		job.addGroup(groupName);
 		job.setType("service");
 		//set the restart policy of core so that if it dies once, it's gone for good
 		//attempts number should be 0. interval and delay don't matter since task is in fail mode
 		job.setRestartPolicy(groupName, 60000000000, 0, 60000000000, "fail");
-		var taskName = "core-task-" + id;
+		var taskName = strings.coreTaskPrefix + id;
 		job.addTask(groupName, taskName);
-		job.setImage(groupName, taskName, "crokita/discovery-core:master");
+		job.setImage(groupName, taskName, strings.baseImageSdlCore + strings.imageTagMaster);
 		job.addPort(groupName, taskName, true, "hmi", 8087);
 		job.addPort(groupName, taskName, true, "tcp", 12345);
+		job.addPort(groupName, taskName, true, "file", 3001);
 		job.addEnv(groupName, taskName, "DOCKER_IP", "${NOMAD_IP_hmi}");
 		job.addConstraint({
 			LTarget: "${meta.core}",
@@ -30,12 +32,12 @@ module.exports = {
 		}, groupName);
 		//set resource limitations
 		job.setCPU(groupName, taskName, 100);
-		job.setMemory(groupName, taskName, 25);
+		job.setMemory(groupName, taskName, 120);
 		job.setMbits(groupName, taskName, 1);
-		job.setEphemeralDisk(groupName, 50, false, false);
-		job.setLogs(groupName, taskName, 2, 10);
+		job.setEphemeralDisk(groupName, 250, false, false);
+		job.setLogs(groupName, taskName, 2, 50);
 
-		var serviceName = "core-service-" + id;
+		var serviceName = strings.coreServicePrefix + id;
 		job.addService(groupName, taskName, serviceName);
 		job.setPortLabel(groupName, taskName, serviceName, "hmi");
 	},
@@ -44,16 +46,19 @@ module.exports = {
 	* @param {object} job - Object of the job file intended for submission to Nomad
 	* @param {object} core - An object from Consul that describes an sdl_core service
 	* @param {UserRequest} request - Request list KV
+	* @param {string} fullAddressBroker - The address the HMI uses to connect to the broker
+	* @param {object} strings - An object of string constants that come from constants.js
+	* @param {Number} coreFilePort - The port of sdl_core's file port
 	*/
-	addHmiGenericGroup: function (job, core, request) {
+	addHmiGenericGroup: function (job, core, request, fullAddressBroker, strings, coreFilePort) {
 		//this adds a group for a user so that another hmi will be created
 		//since each group name must be different make the name based off of the user id
-		var groupName = "hmi-group-" + request.id;
+		var groupName = strings.hmiGroupPrefix + request.id;
 		job.addGroup(groupName);
 		job.setType("service");
-		var taskName = "hmi-task-" + request.id;
+		var taskName = strings.hmiTaskPrefix + request.id;
 		job.addTask(groupName, taskName);
-		job.setImage(groupName, taskName, "crokita/discovery-generic-hmi:manticore");
+		job.setImage(groupName, taskName, strings.baseImageGenericHmi + strings.imageTagManticore);
 		job.addPort(groupName, taskName, true, "user", 8080);
 		job.addPort(groupName, taskName, true, "broker", 9000);
 		job.addConstraint({
@@ -62,45 +67,22 @@ module.exports = {
 			RTarget: "1"
 		}, groupName);
 		//set resource limitations
-		job.setCPU(groupName, taskName, 50);
-		job.setMemory(groupName, taskName, 150);
+		job.setCPU(groupName, taskName, 40);
+		job.setMemory(groupName, taskName, 75);
 		job.setMbits(groupName, taskName, 1);
 		job.setEphemeralDisk(groupName, 30, false, false);
 		job.setLogs(groupName, taskName, 1, 10);
-		//the address to pass into HMI will depend on whether the HAPROXY_OFF flag is on
-		//by default, use the external addresses so that haproxy routes users to the HMI correctly
-		//if HAPROXY_OFF is true, then give the HMI the internal address of core and connect that way
-		//HAPROXY_OFF being true assumes everything is accessible on the same network and should only
-		//be used for the ease of local development
-
-		if (process.env.HAPROXY_OFF !== "true") { //haproxy enabled
-			//the address from the tags is just the prefix. add the domain/subdomain name too
-			//var fullAddressHMI = request.hmiToCorePrefix + "." + process.env.DOMAIN_NAME;
-			var fullAddressBroker = request.brokerAddressPrefix + "." + process.env.DOMAIN_NAME;
-			if (process.env.ELB_SSL_PORT) {
-				//if an ELB SSL PORT was given, we want to use secure websockets
-				//override the value of haproxy port with the port that the ELB will go through
-				//you should make sure the ELB exit port matches the port HAProxy is listening to
-				job.addEnv(groupName, taskName, "HMI_TO_BROKER_ADDR", "wss:\\/\\/" + fullAddressBroker + ":" + process.env.ELB_SSL_PORT);
-			}
-			else {
-				job.addEnv(groupName, taskName, "HMI_TO_BROKER_ADDR", "ws:\\/\\/" + fullAddressBroker + ":" + process.env.HAPROXY_HTTP_LISTEN);
-			}
-		}
-		else { //no haproxy
-			//we need to have backslashes because these urls will
-			//be included in a regex and so we need to escape the forward slash
-			job.addEnv(groupName, taskName, "HMI_TO_BROKER_ADDR", "ws:\\/\\/${NOMAD_IP_broker}:${NOMAD_HOST_PORT_broker}");
-		}
+		job.addEnv(groupName, taskName, "HMI_TO_BROKER_ADDR", fullAddressBroker);
 		job.addEnv(groupName, taskName, "BROKER_TO_CORE_ADDR", core.Address + ":" + core.Port);
+		job.addEnv(groupName, taskName, "BROKER_TO_CORE_FILE_ADDR", core.Address + ":" + coreFilePort);
 
-		var serviceName = "hmi-service-" + request.id;
+		var serviceName = strings.hmiServicePrefix + request.id;
 		job.addService(groupName, taskName, serviceName);
 		job.setPortLabel(groupName, taskName, serviceName, "user");
 		//add a health check
 		var healthObj = {
 			Type: "http",
-			Name: "hmi-alive",
+			Name: strings.hmiAliveHealth,
 			Interval: 3000000000, //in nanoseconds
 			Timeout: 2000000000, //in nanoseconds
 			Path: "/",

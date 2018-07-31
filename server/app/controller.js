@@ -7,6 +7,7 @@ var router = express.Router();
 var app; //express app route provided by context
 var logger; //logger module provided by context
 var logic; //controller logic which handles all endpoint logic
+var config; //config from the context
 var controllerLogic = require('./controller-logic.js');
 
 /** @module app/controller */
@@ -16,6 +17,18 @@ module.exports = function (context) {
 	logger = context.logger;
 	//initialize controller logic
 	logic = controllerLogic(context);
+	config = context.config;
+
+	//For loader.io only
+	app.get('/loaderio-a6fba5ab8b795ba69db2fbb91616b62e', function (req, res) {
+		res.send("loaderio-a6fba5ab8b795ba69db2fbb91616b62e");
+	});
+
+	//for status checks. will be used if the webpage for testing the API is disabled
+	app.get('/', function (req, res) {
+		res.sendStatus(200);
+	});
+
 	//all APIs are prepended with /v1
 	//contain these APIs in this router
 	app.use('/v1', router);
@@ -93,7 +106,7 @@ module.exports = function (context) {
 function extractUserId (req, res, next) {
 	//find the user id from the JWT (if JWT is enabled)
 	//and place it in the body of the request as <id>
-	if (process.env.JWT_SECRET && req.user) {
+	if (config.jwt && req.user) {
 		var id = req.user.user_id;
 		req.body.id = id;
 	}
@@ -112,10 +125,15 @@ function extractUserId (req, res, next) {
 */
 function validateRequestCore (req, res, next) {
 	//validate input. right now only the id is required
-	if (!req.body.id) {
+	if (req.body.id == null) {
 		res.status(400).send("Please provide user identification");
 	}
 	else {
+		//trim the body object of anything that shouldn't exist.
+		var newBody = {
+			id: req.body.id
+		};
+		req.body = newBody;
 		next();
 	}
 }
@@ -128,10 +146,15 @@ function validateRequestCore (req, res, next) {
 */
 function validateRequestLogs (req, res, next) {
 	//validate input. right now only the id is required
-	if (!req.body.id) {
+	if (req.body.id == null) {
 		res.status(400).send("Please provide user identification");
 	}
 	else {
+		//trim the body object of anything that shouldn't exist.
+		var newBody = {
+			id: req.body.id
+		};
+		req.body = newBody;
 		next();
 	}
 }
@@ -144,10 +167,15 @@ function validateRequestLogs (req, res, next) {
 */
 function validateDeleteCore (req, res, next) {
 	//validate input. right now only the id is required
-	if (!req.body.id) {
+	if (req.body.id == null) {
 		res.status(400).send("Please provide user identification");
 	}
 	else {
+		//trim the body object of anything that shouldn't exist.
+		var newBody = {
+			id: req.body.id
+		};
+		req.body = newBody;
 		next();
 	}
 }

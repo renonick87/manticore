@@ -1,36 +1,42 @@
 var AWS = require('aws-sdk');
-var ec2 = new AWS.EC2();
 var elb = new AWS.ELB();
+var cloudWatch = new AWS.CloudWatch();
 var logger;
 
-/**
-* Sets up AwsHandler with logging
-* @param {string} region - The AWS region to be used (ex. us-east-1)
-* @param {winston.Logger} log - An instance of the logger to use
-* @returns {AwsHandler} - An AwsHandler object
-*/
-module.exports = function (region, log) {
-	logger = log;
-    return new AwsHandler(region);
-};
-
+module.exports = AwsHandler;
 
 /**
 * Allows usage of the AWS SDK API
 * @constructor
-* @param {string} region - The AWS region to be used (ex. us-east-1)
 */
-function AwsHandler (region) {
-	if (region) { //only do things if region exists
-		AWS.config.update({region: region});
-	}
+function AwsHandler () {
+	this.config; //config object
 }
+
+/**
+* Sets up AwsHandler with logging 
+* @param {string} region - The AWS region to be used (ex. us-east-1)
+* @param {winston.Logger} log - An instance of the logger to use
+* @returns {AwsHandler} - An AwsHandler object
+*/
+AwsHandler.prototype.init = function (config, log) {
+	logger = log;
+	this.config = config;
+	if (this.config.aws) { //only do things if AWS is enabled
+		AWS.config.update({region: this.config.aws.awsRegion});
+	}
+};
+
+//ELB CODE HERE
 
 /**
 * Given a template generated from HAProxyTemplate.js, update the ELB with the new port data
 * @param {HAProxyTemplate} template - Information meant for consumption by HAProxy
 */
 AwsHandler.prototype.changeState = function (template) {
+	if (!this.config.aws || !this.config.aws.elb) {
+		return; //do nothing if ELB isn't enabled
+	}
 	var self = this; //consistent reference to 'this'
 	//get the current state
 	this.describeLoadBalancer(function (lbStatus) {
@@ -48,17 +54,17 @@ AwsHandler.prototype.changeState = function (template) {
 			Protocol: "HTTPS",
 			LoadBalancerPort: 443,
 			InstanceProtocol: "HTTP",
-			InstancePort: Number(process.env.HAPROXY_HTTP_LISTEN), //parse as integer, as this will be a string
-			SSLCertificateId: process.env.SSL_CERTIFICATE_ARN
+			InstancePort: self.config.haproxy.httpListen, 
+			SSLCertificateId: self.config.aws.elb.sslCertificateArn
 		}),
 		new Listener({
 			Protocol: "SSL",
-			LoadBalancerPort: Number(process.env.ELB_SSL_PORT), //parse as integer, as this will be a string
+			LoadBalancerPort: self.config.aws.elb.sslPort, 
 			InstanceProtocol: "TCP",
-			InstancePort: Number(process.env.HAPROXY_HTTP_LISTEN), //parse as integer, as this will be a string
-			SSLCertificateId: process.env.SSL_CERTIFICATE_ARN
+			InstancePort: self.config.haproxy.httpListen, 
+			SSLCertificateId: self.config.aws.elb.sslCertificateArn
 		})];
-
+		
 		//get tcp mappings. we are only interested in an array of ports that should be opened
 		for (let i = 0; i < template.tcpMaps.length; i++) {
 			expectedListeners.push(new Listener({
@@ -69,7 +75,7 @@ AwsHandler.prototype.changeState = function (template) {
 			}));
 		}
 		//determine which listeners need to be added and which need to be removed
-		var listenerChanges = self.calculateListenerChanges(expectedListeners, actualListeners);
+		var listenerChanges = AwsHandler.calculateListenerChanges(expectedListeners, actualListeners);
 		//ALWAYS remove unneeded listeners before adding needed listeners
 		self.removeListeners(listenerChanges.toBeDeletedListeners, function () {
 			self.addListeners(listenerChanges.toBeAddedListeners, function () {
@@ -80,14 +86,14 @@ AwsHandler.prototype.changeState = function (template) {
 }
 
 /**
-* Determines what the new state of the ELB listeners should be using differences
+* Determines what the new state of the ELB listeners should be using differences. Static method
 * @param {Listener} expectedListeners - The Listeners that should exist
 * @param {Listener} actualListeners - What Listeners are currently on the ELB
 * @returns {object} listenerChanges - Describes changes necessary to the ELB
 * @returns {array} listenerChanges.toBeDeletedListeners - An array of port numbers to be removed from the ELB
 * @returns {array} listenerChanges.toBeAddedListeners - An array of Listener objects to be added to the ELB
 */
-AwsHandler.prototype.calculateListenerChanges = function (expectedListeners, actualListeners) {
+AwsHandler.calculateListenerChanges = function (expectedListeners, actualListeners) {
 	var listenerChanges = {
 		toBeDeletedListeners: [], //NOTE: only save the LoadBalancer ports of the listeners here!
 		toBeAddedListeners: []
@@ -109,7 +115,7 @@ AwsHandler.prototype.calculateListenerChanges = function (expectedListeners, act
 		//take the expected and current listener with the next lowest LB port number
 		var expected = expectedListeners[0];
 		var actual = actualListeners[0];
-		var comparison = this.comparelistenerStates(expected, actual);
+		var comparison = AwsHandler.comparelistenerStates(expected, actual);
 		if (comparison.diff < 0) { 
 			//an expected listener is missing. add expected listener into toBeAddedListeners
 			listenerChanges.toBeAddedListeners.push(expectedListeners.shift()); 
@@ -146,14 +152,14 @@ AwsHandler.prototype.calculateListenerChanges = function (expectedListeners, act
 }
 
 /**
-* Determines whether two Listener objects are equivalent, and which listener LoadBalancer port is higher
+* Determines whether two Listener objects are equivalent, and which listener LoadBalancer port is higher. Static method
 * @param {Listener} listener1 - A Listener to compare against
 * @param {Listener} listener2 - A Listener to compare against
 * @returns {object} status - States the relationship between Listener objects
 * @returns {boolean} status.equivalent - States whether the Listener objects are equivalent
 * @returns {number} status.diff - The difference between two Listener objects' LoadBalancer ports
 */
-AwsHandler.prototype.comparelistenerStates = function (listener1, listener2) {
+AwsHandler.comparelistenerStates = function (listener1, listener2) {
 	var status = {
 		equivalent: true,
 		diff: 0
@@ -176,7 +182,7 @@ AwsHandler.prototype.comparelistenerStates = function (listener1, listener2) {
 */
 AwsHandler.prototype.describeLoadBalancer = function (callback) {
 	var params = {
-		LoadBalancerNames: [process.env.ELB_MANTICORE_NAME],
+		LoadBalancerNames: [this.config.aws.elb.manticoreName],
 	}
 	elb.describeLoadBalancers(params, function (err, data) {
 		//check if we got the load balancer that was requested via env variable
@@ -202,7 +208,7 @@ AwsHandler.prototype.describeLoadBalancer = function (callback) {
 AwsHandler.prototype.addListeners = function (listeners, callback) {
 	var params = {
 		Listeners: listeners,
-		LoadBalancerName: process.env.ELB_MANTICORE_NAME
+		LoadBalancerName: this.config.aws.elb.manticoreName
 	};
 	if (listeners.length > 0) { //only make a call if listeners has data
 		elb.createLoadBalancerListeners(params, function (err, data) {
@@ -225,7 +231,7 @@ AwsHandler.prototype.addListeners = function (listeners, callback) {
 AwsHandler.prototype.removeListeners = function (lbPorts, callback) {
 	var params = {
 		LoadBalancerPorts: lbPorts,
-		LoadBalancerName: process.env.ELB_MANTICORE_NAME
+		LoadBalancerName: this.config.aws.elb.manticoreName
 	};
 	if (lbPorts.length > 0) {
 		elb.deleteLoadBalancerListeners(params, function (err, data) {
@@ -257,3 +263,37 @@ function Listener (body) {
 	this.InstancePort = body.InstancePort;
 	this.SSLCertificateId = body.SSLCertificateId;
 }
+
+
+//CLOUDWATCH CODE HERE
+/**
+* Publishes a metric to CloudWatch
+* @param {string} metricName - Name of the metric
+* @param {string} unitName - The unit the metric is measured in
+* @param {number} value - Value of the metric
+*/
+AwsHandler.prototype.publish = function (metricName, unitName, value) {
+	if (this.config.aws && this.config.aws.cloudWatch) { //only do things if CloudWatch is enabled
+		/*
+			{
+				Name: "IP",
+				Value: this.config.clientAgentIp
+			}
+		*/
+		var params = {
+			Namespace: this.config.aws.cloudWatch.namespace,
+			MetricData: [
+				{
+					MetricName: metricName,
+					Dimensions: [],
+					Timestamp: new Date(),
+					Unit: unitName,
+					Value: value
+				}
+			]
+			//use the dimensions property to show where each log came from by IP
+			//so we can filter the metrics based on reports of one Manticore web app
+		};
+		cloudWatch.putMetricData(params, function (err, data) {});	
+	}
+};

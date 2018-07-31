@@ -10,6 +10,8 @@ var context; //context object provided by init()
 
 module.exports = init;
 
+//keeps track of users who requested an instance but are not in the KV store yet.
+var requestingUsers = {};
 /** @module app/controller-logic */
 
 var utility = {
@@ -17,33 +19,53 @@ var utility = {
 	* Requests an instance of sdl_core and HMI to be ran
 	* @function requestCore
 	* @param {object} body - The body of the user request
-	* @returns {string} - The address of Manticore for the user to connect to via websockets
 	*/
 	requestCore: function (body) {
 		//check that the user hasn't already tried to request a core
 		requestCoreLogic.checkUniqueRequest(body.id, context, function (isUnique, requestsKV) {
-			if (isUnique) { //new ID confirmed
-				//create a user request object for storing in the KV store
-				var requestJSON = context.UserRequest(body);
-				//check if haproxy is enabled. if it is, we need to generate external URL prefixes
-				//that would be used for HAProxy and store them in the request object
-				if (context.isHaProxyEnabled()) { 
-					requestCoreLogic.addExternalAddresses(requestJSON, requestsKV);
-				}
-				//store the request object!
-				context.logger.debug("Store request " + body.id);
-				requestCoreLogic.storeRequestInKVStore(requestJSON, context);
+			if (isUnique && !requestingUsers.id) { //new ID confirmed
+				requestingUsers.id = true;
+				var watch = context.nomader.watchAllocations(context.strings.coreHmiJobPrefix + body.id, context.nomadAddress, 5, function (allocations) {
+					//make sure both allocations for core and hmi tasks are complete
+					var completed = true;
+					if (allocations[0] && allocations[0].ClientStatus !== "complete") {
+						completed = false;
+					} 
+					if (allocations[1] && allocations[1].ClientStatus !== "complete") {
+						completed = false;
+					} 
+					if (completed) {
+						//core and hmi tasks dont exist for this user or are dead.
+						watch.end();
+						//create a user request object for storing in the KV store
+						var requestJSON = context.UserRequest(body);
+						//store the date when this object is made
+						requestJSON.startTime = new Date();
+						//check if haproxy is enabled. if it is, we need to generate external URL prefixes
+						//that would be used for HAProxy and store them in the request object
+						if (context.config.haproxy) { 
+							requestCoreLogic.addExternalAddresses(context, requestJSON, requestsKV);
+						}
+						//store the request object!
+
+						context.logger.debug("Store request " + body.id);
+						requestCoreLogic.storeRequestInKVStore(requestJSON, context, function () {
+							requestingUsers.id = false; //user made it to the KV store. set key for id to false
+						});
+					}
+				});
 			}
-			else { //duplicate request
+			else { //duplicate request, or key already in KV store
 				context.logger.debug("Duplicate request from " + body.id);
 			} 
 		});
-		//start the websocket server for this id
+
+		//start the websocket server for this id and get the random string generated for this id
 		context.socketHandler.requestConnection(body.id);
+		var suffixString = context.socketHandler.getConnectionString(body.id);
 		//return the appropriate address the client should connect to
-		var websocketAddress = context.getWsUrl() + "/" + body.id;
+		var websocketAddress = context.getWsUrl() + "/" + suffixString;
 		//use the id for the socket connection
-		context.logger.debug("Connection ID:" + body.id);
 		context.logger.debug("Connection URL:" + websocketAddress);
 		return websocketAddress;
 	}, 
@@ -67,11 +89,8 @@ var utility = {
 			}
 			else {
 				var taskName; //get the task name
-				for (var key in validAllocation.TaskStates) {
-					taskName = key;
-					break;
-				}
-				context.logger.debug(JSON.stringify(validAllocation, null, 4));
+				//we know what the task name must be solely based on the id of the user!
+				taskName = context.strings.coreTaskPrefix + userId;
 				store.allocation = validAllocation;
 				store.taskName = taskName;
 				callback();
@@ -98,9 +117,8 @@ var utility = {
 	*/
 	deleteCore: function (userId) {
 		//remove the request id of the same id from the KV store
-		context.consuler.delKey(context.keys.data.request + "/" + userId, function () {
-			//that's literally it.
-		});
+		watchesLogic.removeUser(context, userId);
+		//that's literally it.
 	}
 };
 
@@ -114,12 +132,18 @@ function init (contextObj) {
 	context = contextObj; //set context
 	context.logger.debug("Nomad address: " + context.agentAddress + ":4646");
 	//add filler keys so we can detect changes to empty lists in the KV store
+	var httpListen;
+	var domainName;
+	if (context.config.haproxy) {
+		httpListen = context.config.haproxy.httpListen;
+		domainName = context.config.haproxy.domainName;
+	}
 	functionite()
 	.toss(context.consuler.setKeyValue, context.keys.fillers.request, "Keep me here please!")
 	.toss(context.consuler.setKeyValue, context.keys.fillers.waiting, "Keep me here please!")
 	.toss(context.consuler.setKeyValue, context.keys.fillers.allocation, "Keep me here please!")
-	.toss(context.consuler.setKeyValue, context.keys.haproxy.mainPort, process.env.HAPROXY_HTTP_LISTEN)
-	.toss(context.consuler.setKeyValue, context.keys.haproxy.domainName, process.env.DOMAIN_NAME)
+	.toss(context.consuler.setKeyValue, context.keys.haproxy.mainPort, httpListen)
+	.toss(context.consuler.setKeyValue, context.keys.haproxy.domainName, domainName)
 	.toss(function () {
 		//set up watches once. listen forever for changes in consul's services
 		watchesLogic.startKvWatch(context);
